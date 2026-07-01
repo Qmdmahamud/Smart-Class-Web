@@ -1,0 +1,6 @@
+{
+  "name": "Smart Classroom Management",
+  "description": "A comprehensive classroom management system featuring a Cosmic Slate dark-themed dashboard, roll call, scheduling timeline, and administrative control panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
