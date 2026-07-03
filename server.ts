@@ -586,6 +586,19 @@ app.get("/api/teacher/attendance", isTeacher, (req, res) => {
   res.json(filtered);
 });
 
+// Get ALL attendance history for a classroom
+app.get("/api/teacher/attendance/history", isTeacher, (req, res) => {
+  const { classroomId } = req.query;
+  if (!classroomId) {
+    return res.status(400).json({ error: "Classroom ID is required." });
+  }
+
+  const filtered = attendances.filter(
+    att => att.classroomId === classroomId
+  );
+  res.json(filtered);
+});
+
 // Routine/Timeline Scheduler Endpoint (Adding / Editing periods with strictly enforced overlap validation)
 const editScheduleHandler = (req: express.Request, res: express.Response) => {
   const { classroomId, day, startTime, endTime, room, platform, link } = req.body;

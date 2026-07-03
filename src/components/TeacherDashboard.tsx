@@ -34,6 +34,11 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [attendanceTab, setAttendanceTab] = useState<"register" | "history">("register");
+  const [attendanceHistory, setAttendanceHistory] = useState<Attendance[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [historySelectedDate, setHistorySelectedDate] = useState<string>("All");
   
   // Local state for live ongoing session monitoring
   const [currentDay, setCurrentDay] = useState("");
@@ -159,6 +164,113 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
     }
   };
 
+  // Fetch ALL attendance history for the selected classroom
+  const fetchAttendanceHistory = async () => {
+    if (!selectedClassId) return;
+    try {
+      setLoadingHistory(true);
+      const res = await fetch(`/api/teacher/attendance/history?classroomId=${selectedClassId}`, {
+        headers: { "x-user-id": teacher.id }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setAttendanceHistory(data);
+      }
+      setLoadingHistory(false);
+    } catch (err) {
+      console.error(err);
+      setLoadingHistory(false);
+    }
+  };
+
+  // Pivoted Matrix Export: Columns are unique dates, rows are students
+  const downloadPivotedMatrixExcel = () => {
+    if (!activeClass || students.length === 0) {
+      triggerSyncMessage("No students in classroom to export.");
+      return;
+    }
+
+    // 1. Gather all unique dates where attendance was taken
+    const uniqueDates = Array.from(new Set(attendanceHistory.map(h => h.date))).sort();
+
+    let csvContent = "\uFEFF"; // UTF-8 BOM
+    // Header
+    csvContent += "Student Name,Email Address," + uniqueDates.map(d => `"${d}"`).join(",") + ",Total Present,Total Late,Total Absent,Attendance Rate (%)\n";
+
+    // Rows
+    sortedStudents.forEach(st => {
+      let presentCount = 0;
+      let lateCount = 0;
+      let absentCount = 0;
+
+      const rowData = uniqueDates.map(d => {
+        const record = attendanceHistory.find(h => h.studentId === st.id && h.date === d);
+        if (record) {
+          if (record.status === "Present") presentCount++;
+          else if (record.status === "Late") lateCount++;
+          else if (record.status === "Absent") absentCount++;
+          return record.status;
+        }
+        return "—"; // Not recorded on this day
+      });
+
+      const totalCount = presentCount + lateCount + absentCount;
+      const rate = totalCount > 0 ? Math.round(((presentCount + lateCount * 0.8) / totalCount) * 100) : "N/A";
+
+      const nameEscaped = `"${st.fullName.replace(/"/g, '""')}"`;
+      const emailEscaped = `"${st.email.replace(/"/g, '""')}"`;
+
+      csvContent += `${nameEscaped},${emailEscaped},${rowData.join(",")},${presentCount},${lateCount},${absentCount},${rate}%\n`;
+    });
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Attendance_Matrix_${activeClass.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    triggerSyncMessage("Attendance Matrix exported to Excel successfully.");
+  };
+
+  // Chronological log table
+  const downloadChronologicalExcel = () => {
+    if (!activeClass || attendanceHistory.length === 0) {
+      triggerSyncMessage("No history records available to export.");
+      return;
+    }
+
+    let csvContent = "\uFEFF"; // UTF-8 BOM
+    csvContent += "Log ID,Date,Student Name,Email Address,Attendance Status,Classroom Name\n";
+
+    const sortedHistory = [...attendanceHistory].sort((a, b) => b.date.localeCompare(a.date));
+
+    sortedHistory.forEach(rec => {
+      const student = students.find(s => s.id === rec.studentId);
+      const email = student ? student.email : "";
+
+      const idEscaped = `"${rec.id.replace(/"/g, '""')}"`;
+      const dateEscaped = `"${rec.date.replace(/"/g, '""')}"`;
+      const nameEscaped = `"${rec.studentName.replace(/"/g, '""')}"`;
+      const emailEscaped = `"${email.replace(/"/g, '""')}"`;
+      const statusEscaped = `"${rec.status.replace(/"/g, '""')}"`;
+      const classEscaped = `"${activeClass.name.replace(/"/g, '""')}"`;
+
+      csvContent += `${idEscaped},${dateEscaped},${nameEscaped},${emailEscaped},${statusEscaped},${classEscaped}\n`;
+    });
+
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `Attendance_Logs_${activeClass.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    triggerSyncMessage("Chronological log exported to Excel successfully.");
+  };
+
   // Fetch assignments, submissions, and priority reminders
   const fetchTasksAndReminders = async () => {
     if (!selectedClassId) return;
@@ -196,6 +308,7 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
     if (selectedClassId) {
       fetchStudents();
       fetchTasksAndReminders();
+      fetchAttendanceHistory();
     }
   }, [selectedClassId, attendanceDate]);
 
@@ -246,6 +359,7 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
         setSyncStatus("Saved successfully.");
         // Refresh students to reflect newly aggregated averages
         fetchStudents();
+        fetchAttendanceHistory();
         setTimeout(() => setSyncStatus("All data synchronized."), 2000);
       } else {
         setSyncStatus("Failed to save row.");
@@ -280,6 +394,7 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
       if (res.ok) {
         setSyncStatus("Saved successfully.");
         fetchStudents(); // Refresh averages
+        fetchAttendanceHistory();
         setTimeout(() => setSyncStatus("All data synchronized."), 2000);
       } else {
         setSyncStatus("Sync failed.");
@@ -578,90 +693,273 @@ export default function TeacherDashboard({ teacher }: TeacherProps) {
         {/* LEFT COMPREHENSIVE AREA: Attendance & Routine Timeline */}
         <div className="lg:col-span-8 space-y-8">
           
-          {/* MODULE 1: Attendance Registry (Stable Alphabetical UI Engine) */}
+          {/* MODULE 1: Attendance Registry & History Center (Durable Tabbed Console) */}
           <div className="bg-[#161F30] border border-[#26354D] rounded-2xl p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-[#26354D]/50 pb-4">
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 border-b border-[#26354D]/50 pb-4">
               <div>
                 <h2 className="text-lg font-bold font-display text-white flex items-center gap-2">
                   <Users className="h-5 w-5 text-[#7C3AED]" />
-                  <span>Smart Attendance Registry</span>
+                  <span>Smart Attendance System</span>
                 </h2>
-                <p className="text-xs text-gray-400 mt-1">
-                  Roster items sorted strictly alphabetically. Tapping status updates records dynamically.
-                </p>
+                <div className="flex gap-4 mt-2">
+                  <button
+                    onClick={() => setAttendanceTab("register")}
+                    className={`pb-1 text-xs font-semibold tracking-wider uppercase border-b-2 transition-all ${
+                      attendanceTab === "register"
+                        ? "border-[#7C3AED] text-[#7C3AED]"
+                        : "border-transparent text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Take Attendance
+                  </button>
+                  <button
+                    onClick={() => setAttendanceTab("history")}
+                    className={`pb-1 text-xs font-semibold tracking-wider uppercase border-b-2 transition-all ${
+                      attendanceTab === "history"
+                        ? "border-[#7C3AED] text-[#7C3AED]"
+                        : "border-transparent text-gray-400 hover:text-white"
+                    }`}
+                  >
+                    Roll Call History
+                  </button>
+                </div>
               </div>
 
               {/* Attendance Operations controls */}
-              <div className="flex items-center gap-2 w-full sm:w-auto">
-                <input
-                  type="date"
-                  value={attendanceDate}
-                  onChange={(e) => setAttendanceDate(e.target.value)}
-                  className="bg-[#0B0F17] border border-[#26354D] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-[#06B6D4] min-h-[48px] font-mono"
-                />
-                <button
-                  onClick={handleMarkAllPresent}
-                  className="min-h-[48px] flex-1 sm:flex-none text-xs font-semibold px-4 py-2.5 bg-[#06B6D4]/10 hover:bg-[#06B6D4]/20 border border-[#06B6D4]/40 text-[#06B6D4] rounded-xl transition-all uppercase tracking-wider"
-                >
-                  Mark All Present
-                </button>
-              </div>
-            </div>
-
-            {/* Stable Alphabetical Student Table */}
-            <div className="divide-y divide-[#26354D]/50 border border-[#26354D]/50 rounded-xl overflow-hidden bg-[#0B0F17]/30">
-              {sortedStudents.length === 0 ? (
-                <div className="p-12 text-center text-gray-500 text-xs font-mono">
-                  No students currently enrolled in {activeClass?.name || "this classroom"}.
+              {attendanceTab === "register" ? (
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <input
+                    type="date"
+                    value={attendanceDate}
+                    onChange={(e) => setAttendanceDate(e.target.value)}
+                    className="bg-[#0B0F17] border border-[#26354D] rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-[#06B6D4] min-h-[48px] font-mono"
+                  />
+                  <button
+                    onClick={handleMarkAllPresent}
+                    className="min-h-[48px] flex-1 sm:flex-none text-xs font-semibold px-4 py-2.5 bg-[#06B6D4]/10 hover:bg-[#06B6D4]/20 border border-[#06B6D4]/40 text-[#06B6D4] rounded-xl transition-all uppercase tracking-wider"
+                  >
+                    Mark All Present
+                  </button>
                 </div>
               ) : (
-                sortedStudents.map((student) => {
-                  const currentStatus = attendanceRecords[student.id] || "Present";
-                  return (
-                    <div 
-                      key={student.id} 
-                      className="p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 transition-colors hover:bg-[#161F30]/40"
-                    >
-                      {/* Student Info Info Block */}
-                      <div className="flex items-center gap-3">
-                        <div className="h-9 w-9 rounded-full bg-[#161F30] border border-[#26354D] flex items-center justify-center text-xs font-bold text-gray-300">
-                          {student.fullName.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div>
-                          <div className="text-sm font-semibold text-white">{student.fullName}</div>
-                          <div className="text-[10px] text-gray-400 font-mono mt-0.5">{student.email}</div>
-                        </div>
-                      </div>
-
-                      {/* Interactive Segmented Pill Controls (Strictly static size to block layout shifts, min-h 48px) */}
-                      <div className="flex items-center bg-[#0B0F17]/80 border border-[#26354D] rounded-xl p-1 w-full sm:w-auto">
-                        {(["Present", "Late", "Absent"] as const).map((status) => {
-                          const isActive = currentStatus === status;
-                          let pillStyles = "";
-                          if (isActive) {
-                            if (status === "Present") pillStyles = "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-bold";
-                            if (status === "Late") pillStyles = "bg-amber-500/10 text-amber-400 border-amber-500/30 font-bold";
-                            if (status === "Absent") pillStyles = "bg-rose-500/10 text-rose-400 border-rose-500/30 font-bold";
-                          } else {
-                            pillStyles = "text-gray-500 hover:text-gray-300 border-transparent";
-                          }
-
-                          return (
-                            <button
-                              key={status}
-                              onClick={() => handleToggleAttendance(student.id, status)}
-                              className={`min-h-[44px] flex-1 sm:flex-initial py-2 px-4 text-xs font-semibold rounded-lg border uppercase tracking-wider text-center transition-all ${pillStyles}`}
-                            >
-                              {status}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <button
+                    onClick={downloadPivotedMatrixExcel}
+                    className="min-h-[48px] flex-1 sm:flex-none text-xs font-semibold px-4 py-2.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 rounded-xl transition-all uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <FileText className="h-4 w-4" />
+                    <span>Download Matrix (Excel)</span>
+                  </button>
+                  <button
+                    onClick={downloadChronologicalExcel}
+                    className="min-h-[48px] flex-1 sm:flex-none text-xs font-semibold px-4 py-2.5 bg-[#06B6D4]/10 hover:bg-[#06B6D4]/20 border border-[#06B6D4]/40 text-[#06B6D4] rounded-xl transition-all uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <FileText className="h-4 w-4" />
+                    <span>Download Logs (Excel)</span>
+                  </button>
+                </div>
               )}
             </div>
+
+            {attendanceTab === "register" ? (
+              /* Stable Alphabetical Student Table (Original Take Attendance view) */
+              <div className="divide-y divide-[#26354D]/50 border border-[#26354D]/50 rounded-xl overflow-hidden bg-[#0B0F17]/30">
+                {sortedStudents.length === 0 ? (
+                  <div className="p-12 text-center text-gray-500 text-xs font-mono">
+                    No students currently enrolled in {activeClass?.name || "this classroom"}.
+                  </div>
+                ) : (
+                  sortedStudents.map((student) => {
+                    const currentStatus = attendanceRecords[student.id] || "Present";
+                    return (
+                      <div 
+                        key={student.id} 
+                        className="p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 transition-colors hover:bg-[#161F30]/40"
+                      >
+                        {/* Student Info Info Block */}
+                        <div className="flex items-center gap-3">
+                          <div className="h-9 w-9 rounded-full bg-[#161F30] border border-[#26354D] flex items-center justify-center text-xs font-bold text-gray-300">
+                            {student.fullName.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-white">{student.fullName}</div>
+                            <div className="text-[10px] text-gray-400 font-mono mt-0.5">{student.email}</div>
+                          </div>
+                        </div>
+
+                        {/* Interactive Segmented Pill Controls (Strictly static size to block layout shifts, min-h 48px) */}
+                        <div className="flex items-center bg-[#0B0F17]/80 border border-[#26354D] rounded-xl p-1 w-full sm:w-auto">
+                          {(["Present", "Late", "Absent"] as const).map((status) => {
+                            const isActive = currentStatus === status;
+                            let pillStyles = "";
+                            if (isActive) {
+                              if (status === "Present") pillStyles = "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 font-bold";
+                              if (status === "Late") pillStyles = "bg-amber-500/10 text-amber-400 border-amber-500/30 font-bold";
+                              if (status === "Absent") pillStyles = "bg-rose-500/10 text-rose-400 border-rose-500/30 font-bold";
+                            } else {
+                              pillStyles = "text-gray-500 hover:text-gray-300 border-transparent";
+                            }
+
+                            return (
+                              <button
+                                key={status}
+                                onClick={() => handleToggleAttendance(student.id, status)}
+                                className={`min-h-[44px] flex-1 sm:flex-initial py-2 px-4 text-xs font-semibold rounded-lg border uppercase tracking-wider text-center transition-all ${pillStyles}`}
+                              >
+                                {status}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            ) : (
+              /* High-fidelity History Log View with Live Filters */
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1">
+                    <input
+                      type="text"
+                      placeholder="Search student name..."
+                      value={historySearchQuery}
+                      onChange={(e) => setHistorySearchQuery(e.target.value)}
+                      className="w-full bg-[#0B0F17] border border-[#26354D] rounded-xl px-4 py-3 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-[#7C3AED]"
+                    />
+                  </div>
+                  <div className="w-full sm:w-48">
+                    <select
+                      value={historySelectedDate}
+                      onChange={(e) => setHistorySelectedDate(e.target.value)}
+                      className="w-full bg-[#0B0F17] border border-[#26354D] rounded-xl px-4 py-3 text-xs text-white focus:outline-none focus:border-[#7C3AED] font-mono"
+                    >
+                      <option value="All">All Dates</option>
+                      {Array.from(new Set(attendanceHistory.map((h) => h.date)))
+                        .sort((a: string, b: string) => b.localeCompare(a))
+                        .map((dateStr) => (
+                          <option key={dateStr} value={dateStr}>
+                            {dateStr}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="border border-[#26354D]/50 rounded-xl overflow-hidden bg-[#0B0F17]/30 max-h-[450px] overflow-y-auto">
+                  {loadingHistory ? (
+                    <div className="p-12 text-center text-gray-500 text-xs font-mono flex flex-col items-center justify-center gap-3">
+                      <RefreshCw className="h-5 w-5 animate-spin text-[#7C3AED]" />
+                      <span>Loading historical logs...</span>
+                    </div>
+                  ) : attendanceHistory.length === 0 ? (
+                    <div className="p-12 text-center text-gray-500 text-xs font-mono">
+                      No roll call records found in history for this classroom.
+                    </div>
+                  ) : (() => {
+                    const filteredHistory = attendanceHistory.filter((rec) => {
+                      const matchesSearch = rec.studentName.toLowerCase().includes(historySearchQuery.toLowerCase());
+                      const matchesDate = historySelectedDate === "All" || rec.date === historySelectedDate;
+                      return matchesSearch && matchesDate;
+                    });
+
+                    if (filteredHistory.length === 0) {
+                      return (
+                        <div className="p-12 text-center text-gray-500 text-xs font-mono">
+                          No historical records matched your active filter criteria.
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-[#161F30] border-b border-[#26354D]/50 text-gray-400 font-mono text-[10px] uppercase tracking-wider">
+                            <th className="p-3 pl-4">Date</th>
+                            <th className="p-3">Student Name</th>
+                            <th className="p-3">Status</th>
+                            <th className="p-3 pr-4 text-right">Quick Edit</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#26354D]/30">
+                          {filteredHistory.map((rec) => {
+                            let statusBadge = "";
+                            if (rec.status === "Present") {
+                              statusBadge = "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+                            } else if (rec.status === "Late") {
+                              statusBadge = "bg-amber-500/10 text-amber-400 border border-amber-500/20";
+                            } else if (rec.status === "Absent") {
+                              statusBadge = "bg-rose-500/10 text-rose-400 border border-rose-500/20";
+                            }
+
+                            return (
+                              <tr key={rec.id} className="hover:bg-[#161F30]/20 transition-colors">
+                                <td className="p-3 pl-4 font-mono text-[11px] text-gray-300">{rec.date}</td>
+                                <td className="p-3 font-semibold text-white">{rec.studentName}</td>
+                                <td className="p-3">
+                                  <span className={`inline-block px-2 py-0.5 rounded font-bold text-[9px] uppercase tracking-wide ${statusBadge}`}>
+                                    {rec.status}
+                                  </span>
+                                </td>
+                                <td className="p-3 pr-4 text-right">
+                                  <div className="flex justify-end gap-1">
+                                    {(["Present", "Late", "Absent"] as const).map((st) => (
+                                      <button
+                                        key={st}
+                                        onClick={async () => {
+                                          setSyncStatus(`Updating...`);
+                                          const res = await fetch("/attendance/update/", {
+                                            method: "POST",
+                                            headers: {
+                                              "Content-Type": "application/json",
+                                              "x-user-id": teacher.id
+                                            },
+                                            body: JSON.stringify({
+                                              student_id: rec.studentId,
+                                              classroom_id: selectedClassId,
+                                              status: st,
+                                              date: rec.date
+                                            })
+                                          });
+                                          if (res.ok) {
+                                            // update local history record state immediately
+                                            setAttendanceHistory((prev) =>
+                                              prev.map((item) =>
+                                                item.id === rec.id ? { ...item, status: st } : item
+                                              )
+                                            );
+                                            fetchStudents(); // refresh general student statistics
+                                            triggerSyncMessage("Attendance updated & synchronized.");
+                                          } else {
+                                            triggerSyncMessage("Update persistence failed.");
+                                          }
+                                        }}
+                                        className={`px-1.5 py-0.5 rounded text-[9px] font-mono border transition-all ${
+                                          rec.status === st
+                                            ? st === "Present"
+                                              ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400 font-bold"
+                                              : st === "Late"
+                                              ? "bg-amber-500/15 border-amber-500/30 text-amber-400 font-bold"
+                                              : "bg-rose-500/15 border-rose-500/30 text-rose-400 font-bold"
+                                            : "bg-transparent border-transparent text-gray-500 hover:text-gray-300"
+                                        }`}
+                                      >
+                                        {st[0]}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* MODULE 2: Routine Timeline Matrix (Live Status Pulses with Cyan Aura) */}
